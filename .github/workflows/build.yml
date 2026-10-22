@@ -1,0 +1,80 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      archs:
+        description: "Architectures for the app and the dext"
+        default: "arm64 arm64e"
+  push:
+    branches: ["**"]
+
+jobs:
+  build:
+    # If this label is rejected, try macos-latest or the newest macos-NN label GitHub lists.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          echo "iphoneos SDK:  $(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "driverkit SDK: $(xcrun --sdk driverkit --show-sdk-path)"
+          xcrun --sdk driverkit --find iig || true
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        env:
+          ARCHS_IN: ${{ inputs.archs || 'arm64 arm64e' }}
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project UsbmuxProbe.xcodeproj \
+            -scheme UsbmuxProbeApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            ARCHS="$ARCHS_IN" ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log | tail -n 150
+
+      - name: Check and package IPA
+        run: |
+          set -e
+          APP=$(find build/Build/Products -maxdepth 2 -name 'UsbmuxProbe.app' | head -n 1)
+          test -n "$APP" || { echo "app bundle not found"; exit 1; }
+
+          echo "--- app slices"
+          lipo -archs "$APP/UsbmuxProbe"
+
+          echo "--- embedded dext"
+          ls -la "$APP/SystemExtensions" || { echo "dext was not embedded"; exit 1; }
+          for d in "$APP"/SystemExtensions/*.dext; do
+            exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$d/Info.plist")
+            echo "$d"
+            lipo -archs "$d/$exe"
+            vtool -show-build "$d/$exe" | head -n 8
+          done
+
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry UsbmuxProbe.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: UsbmuxProbe-ipa
+          path: UsbmuxProbe.ipa
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log

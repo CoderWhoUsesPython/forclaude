@@ -1,0 +1,51 @@
+name: UsbmuxProbe
+
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "17.0"
+
+targets:
+  UsbmuxProbeApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes:
+          - Info.plist
+          - App.entitlements
+    dependencies:
+      - target: UsbmuxProbeDriver
+    settings:
+      base:
+        PRODUCT_NAME: UsbmuxProbe
+        PRODUCT_BUNDLE_IDENTIFIER: com.usbmuxprobe.app
+        INFOPLIST_FILE: App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: App/App.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: App/Bridging-Header.h
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "2"
+
+  UsbmuxProbeDriver:
+    type: driver-extension
+    platform: macOS
+    sources:
+      - path: Driver
+        excludes:
+          - Info.plist
+          - Driver.entitlements
+    settings:
+      base:
+        # Same convention as Xcode's DriverKit template: the .dext is named after its bundle id.
+        PRODUCT_BUNDLE_IDENTIFIER: com.usbmuxprobe.app.driver
+        PRODUCT_NAME: $(PRODUCT_BUNDLE_IDENTIFIER)
+        SDKROOT: driverkit
+        SUPPORTED_PLATFORMS: driverkit
+        DRIVERKIT_DEPLOYMENT_TARGET: "22.0"
+        INFOPLIST_FILE: Driver/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Driver/Driver.entitlements
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++2a
+        OTHER_LDFLAGS: "-framework DriverKit -framework USBDriverKit"
+        SKIP_INSTALL: YES

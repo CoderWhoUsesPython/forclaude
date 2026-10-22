@@ -1,0 +1,24 @@
+#ifndef UsbmuxProbe_h
+#define UsbmuxProbe_h
+
+#include <Availability.h>
+#include <DriverKit/IOService.iig>
+
+// Matches any Apple (vendor 0x05AC) USB device. Start() records what it matched
+// so the host app can read it back through the user client.
+class UsbmuxProbe : public IOService
+{
+public:
+    virtual bool init() override;
+    virtual void free() override;
+    virtual kern_return_t Start(IOService* provider) override;
+    virtual kern_return_t Stop(IOService* provider) override;
+    virtual kern_return_t NewUserClient(uint32_t type, IOUserClient** userClient) override;
+
+    kern_return_t GetStatus(uint64_t* openResult,
+                            uint64_t* vendorId,
+                            uint64_t* productId,
+                            uint64_t* startCount) LOCALONLY;
+};
+
+#endif
