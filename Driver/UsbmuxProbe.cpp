@@ -62,7 +62,7 @@ kern_return_t IMPL(UsbmuxProbe, Start)
     }
 
     // Opening the device is the first real privilege this driver needs.
-    ivars->openResult = (uint64_t)ivars->device->Open(this, 0, nullptr);
+    ivars->openResult = (uint64_t)ivars->device->Open(this, 0, 0);
 
     os_log(OS_LOG_DEFAULT,
            "UsbmuxProbe: started vid=0x%llx pid=0x%llx open=0x%llx",
