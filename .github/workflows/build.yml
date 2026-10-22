@@ -71,6 +71,20 @@ jobs:
             vtool -show-build "$d/$exe" | head -n 8
           done
 
+          # Ad-hoc sign so each binary carries its entitlements. SideStore reads them from the
+          # existing signature when it re-signs. Dext first, then the app (no --deep).
+          for d in "$APP"/SystemExtensions/*.dext; do
+            codesign --force --sign - --timestamp=none --entitlements Driver/Driver.entitlements "$d"
+          done
+          codesign --force --sign - --timestamp=none --entitlements App/App.entitlements "$APP"
+
+          echo "--- embedded entitlements (dext)"
+          for d in "$APP"/SystemExtensions/*.dext; do
+            codesign -d --entitlements :- "$d" 2>/dev/null
+          done
+          echo "--- embedded entitlements (app)"
+          codesign -d --entitlements :- "$APP" 2>/dev/null
+
           mkdir -p Payload
           cp -R "$APP" Payload/
           zip -qry UsbmuxProbe.ipa Payload
