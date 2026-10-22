@@ -45,12 +45,6 @@ kern_return_t IMPL(UsbmuxProbeUserClient, Stop)
     return Stop(provider, SUPERDISPATCH);
 }
 
-kern_return_t IMPL(UsbmuxProbeUserClient, ClientClose)
-{
-    Terminate(0);
-    return kIOReturnSuccess;
-}
-
 // Selector 0: ping    -> 1 scalar out (magic value)
 // Selector 1: status  -> 4 scalars out (open result, vendor id, product id, start count)
 kern_return_t UsbmuxProbeUserClient::ExternalMethod(uint64_t selector,

@@ -23,6 +23,15 @@ jobs:
           echo "driverkit SDK: $(xcrun --sdk driverkit --show-sdk-path)"
           xcrun --sdk driverkit --find iig || true
 
+      - name: Dump DriverKit headers we depend on
+        run: |
+          SDK=$(xcrun --sdk driverkit --show-sdk-path)
+          for h in IOUserClient.iig IOService.iig; do
+            f=$(find "$SDK" -name "$h" | head -n 1)
+            echo "===== $f"
+            grep -n -E "ClientClose|ExternalMethod|CopyProperties|NewUserClient|virtual|LOCALONLY" "$f" | head -n 60
+          done
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
