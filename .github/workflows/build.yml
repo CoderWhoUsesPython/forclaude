@@ -1,4 +1,4 @@
-name: Build unsigned IPA
+name: Build IPA
 
 on:
   workflow_dispatch:
@@ -9,10 +9,19 @@ on:
   push:
     branches: ["**"]
 
+# Optional repository secrets (Settings > Secrets and variables > Actions). With none set, this
+# produces an ad-hoc signed IPA for SideStore to re-sign, exactly as before.
+#   TEAM_ID             your Apple team id; replaces the TEAMID placeholder in the dext bundle id
+#   SIGN_CERT_P12       base64 of your development certificate (.p12)
+#   SIGN_CERT_PASSWORD  the .p12 password
+#   DEXT_PROFILE        base64 of a .mobileprovision to embed in the dext (optional)
 jobs:
   build:
     # If this label is rejected, try macos-latest or the newest macos-NN label GitHub lists.
     runs-on: macos-latest
+    env:
+      HAVE_TEAM: ${{ secrets.TEAM_ID != '' }}
+      HAVE_CERT: ${{ secrets.SIGN_CERT_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -23,17 +32,14 @@ jobs:
           echo "driverkit SDK: $(xcrun --sdk driverkit --show-sdk-path)"
           xcrun --sdk driverkit --find iig || true
 
-      - name: Dump DriverKit headers we depend on
-        run: |
-          SDK=$(xcrun --sdk driverkit --show-sdk-path)
-          for h in IOUserClient.iig IOService.iig; do
-            f=$(find "$SDK" -name "$h" | head -n 1)
-            echo "===== $f"
-            grep -n -E "ClientClose|ExternalMethod|CopyProperties|NewUserClient|virtual|LOCALONLY" "$f" | head -n 60
-          done
-
       - name: Install XcodeGen
         run: brew install xcodegen
+
+      - name: Apply team id (optional)
+        if: env.HAVE_TEAM == 'true'
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: sed -i '' "s/TEAMID/${TEAM_ID}/g" project.yml
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -53,9 +59,34 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             2>&1 | tee build.log | tail -n 150
 
-      - name: Check and package IPA
+      - name: Import signing certificate (optional)
+        if: env.HAVE_CERT == 'true'
+        env:
+          SIGN_CERT_P12: ${{ secrets.SIGN_CERT_P12 }}
+          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
         run: |
           set -e
+          KC="$RUNNER_TEMP/sign.keychain-db"
+          KP="$(uuidgen)"
+          echo "$SIGN_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KP" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p "$KP" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$SIGN_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          IDENT="$(security find-identity -v -p codesigning "$KC" | awk 'NR==1 {print $2}')"
+          test -n "$IDENT" || { echo "no codesigning identity found in the p12"; exit 1; }
+          echo "IDENT=$IDENT" >> "$GITHUB_ENV"
+          security find-identity -v -p codesigning "$KC" | sed 's/[0-9A-F]\{40\}/<hash>/'
+
+      - name: Check, sign and package IPA
+        env:
+          DEXT_PROFILE: ${{ secrets.DEXT_PROFILE }}
+        run: |
+          set -e
+          SIGN="${IDENT:--}"
           APP=$(find build/Build/Products -maxdepth 2 -name 'UsbmuxProbe.app' | head -n 1)
           test -n "$APP" || { echo "app bundle not found"; exit 1; }
 
@@ -71,19 +102,22 @@ jobs:
             vtool -show-build "$d/$exe" | head -n 8
           done
 
-          # Ad-hoc sign so each binary carries its entitlements. SideStore reads them from the
-          # existing signature when it re-signs. Dext first, then the app (no --deep).
+          # Sign so each binary carries its entitlements (ad-hoc unless a certificate was
+          # imported). Dext first, then the app; no --deep.
           for d in "$APP"/SystemExtensions/*.dext; do
-            codesign --force --sign - --timestamp=none --entitlements Driver/Driver.entitlements "$d"
+            if [ -n "$DEXT_PROFILE" ]; then
+              echo "$DEXT_PROFILE" | base64 --decode > "$d/embedded.mobileprovision"
+            fi
+            codesign --force --sign "$SIGN" --timestamp=none --entitlements Driver/Driver.entitlements "$d"
           done
-          codesign --force --sign - --timestamp=none --entitlements App/App.entitlements "$APP"
+          codesign --force --sign "$SIGN" --timestamp=none --entitlements App/App.entitlements "$APP"
 
-          echo "--- embedded entitlements (dext)"
+          echo "--- signature (dext)"
           for d in "$APP"/SystemExtensions/*.dext; do
-            codesign -d --entitlements :- "$d" 2>/dev/null
+            codesign -dvv "$d" 2>&1 | grep -E "^(Identifier|Authority|TeamIdentifier|Signature)" || true
+            codesign -d --entitlements :- "$d" 2>/dev/null | grep -o "com.apple.developer[A-Za-z0-9.-]*" | sort -u
+            ls "$d" | grep -c embedded.mobileprovision | sed 's/^/embedded profile present: /' || true
           done
-          echo "--- embedded entitlements (app)"
-          codesign -d --entitlements :- "$APP" 2>/dev/null
 
           mkdir -p Payload
           cp -R "$APP" Payload/
