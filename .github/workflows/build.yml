@@ -46,11 +46,24 @@ jobs:
           set -e
           KC="$RUNNER_TEMP/sign.keychain-db"
           KP="$(uuidgen)"
-          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          P12="$RUNNER_TEMP/cert.p12"
+          echo "$CERT_B64" | tr -d ' \r\n' | base64 --decode > "$P12"
+          echo "decoded: $(wc -c < "$P12" | tr -d ' ') bytes, first bytes (hex): $(head -c 2 "$P12" | xxd -p)  [a .p12 starts with 30 82 or 30 80]"
+          if head -c 12 "$P12" | grep -q -- '-----BEGIN'; then echo "note: the decoded data is PEM text, not a .p12"; fi
           security create-keychain -p "$KP" "$KC"
           security set-keychain-settings -lut 3600 "$KC"
           security unlock-keychain -p "$KP" "$KC"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$SIGN_CERT_PASSWORD" -T /usr/bin/codesign
+          if ! security import "$P12" -k "$KC" -P "$SIGN_CERT_PASSWORD" -T /usr/bin/codesign; then
+            echo "security could not read the .p12; trying an OpenSSL re-encode (OpenSSL 3 p12 files often need this)"
+            brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3 >/dev/null
+            OSSL="$(brew --prefix openssl@3)/bin/openssl"
+            "$OSSL" pkcs12 -in "$P12" -passin "pass:$SIGN_CERT_PASSWORD" -nodes -out "$RUNNER_TEMP/all.pem" 2>"$RUNNER_TEMP/ossl.err" || {
+              echo "openssl could not read it either:"; head -n 5 "$RUNNER_TEMP/ossl.err" | sed 's/^/  /'; exit 1; }
+            "$OSSL" pkcs12 -export -in "$RUNNER_TEMP/all.pem" -out "$RUNNER_TEMP/legacy.p12" -passout pass:tmp \
+              -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1
+            security import "$RUNNER_TEMP/legacy.p12" -k "$KC" -P tmp -T /usr/bin/codesign
+            rm -f "$RUNNER_TEMP/all.pem" "$RUNNER_TEMP/legacy.p12"
+          fi
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KC" >/dev/null
           security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
           rm -f "$RUNNER_TEMP/cert.p12"
