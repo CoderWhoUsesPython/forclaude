@@ -9,19 +9,21 @@ on:
   push:
     branches: ["**"]
 
-# Optional repository secrets (Settings > Secrets and variables > Actions). With none set, this
-# produces an ad-hoc signed IPA for SideStore to re-sign, exactly as before.
-#   TEAM_ID             your Apple team id; replaces the TEAMID placeholder in the dext bundle id
-#   SIGN_CERT_P12       base64 of your development certificate (.p12)
-#   SIGN_CERT_PASSWORD  the .p12 password
-#   DEXT_PROFILE        base64 of a .mobileprovision to embed in the dext (optional)
+# Repository secrets (Settings > Secrets and variables > Actions). With none set, this produces
+# an ad-hoc signed IPA for SideStore to re-sign.
+#   PASSWORDISFEET      base64 of your development certificate (.p12); SIGN_CERT_P12 also works
+#   SIGN_CERT_PASSWORD  the .p12 password, if it has one
+#   TEAM_ID             optional; otherwise the team id is read from the certificate
+#   DEXT_PROFILE        optional; base64 of a .mobileprovision to embed in the dext
+# This repository is public: the certificate name and team id are masked in the logs, and the
+# build log artifact is redacted before upload.
 jobs:
   build:
     # If this label is rejected, try macos-latest or the newest macos-NN label GitHub lists.
     runs-on: macos-latest
     env:
       HAVE_TEAM: ${{ secrets.TEAM_ID != '' }}
-      HAVE_CERT: ${{ secrets.SIGN_CERT_P12 != '' }}
+      HAVE_CERT: ${{ (secrets.SIGN_CERT_P12 || secrets.PASSWORDISFEET) != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,11 +37,48 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Apply team id (optional)
-        if: env.HAVE_TEAM == 'true'
+      - name: Import signing certificate (optional)
+        if: env.HAVE_CERT == 'true'
         env:
-          TEAM_ID: ${{ secrets.TEAM_ID }}
-        run: sed -i '' "s/TEAMID/${TEAM_ID}/g" project.yml
+          CERT_B64: ${{ secrets.SIGN_CERT_P12 || secrets.PASSWORDISFEET }}
+          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
+        run: |
+          set -e
+          KC="$RUNNER_TEMP/sign.keychain-db"
+          KP="$(uuidgen)"
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KP" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p "$KP" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$SIGN_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          LINE="$(security find-identity -v -p codesigning "$KC" | sed -n '1p')"
+          IDENT="$(echo "$LINE" | awk '{print $2}')"
+          NAME="$(echo "$LINE" | sed -n 's/.*"\(.*\)".*/\1/p')"
+          test -n "$IDENT" || { echo "no valid codesigning identity found in the .p12"; exit 1; }
+          echo "::add-mask::$NAME"
+
+          # The team id is the OU of the certificate subject.
+          TEAM="$(security find-certificate -c "$NAME" -p "$KC" | openssl x509 -noout -subject -nameopt RFC2253 | tr ',' '\n' | sed -n 's/^OU=//p' | head -n 1)"
+          if [ -n "$TEAM" ]; then echo "::add-mask::$TEAM"; fi
+
+          echo "IDENT=$IDENT" >> "$GITHUB_ENV"
+          echo "CERT_TEAM=$TEAM" >> "$GITHUB_ENV"
+          echo "certificate imported: yes | team id found in certificate: $([ -n "$TEAM" ] && echo yes || echo no)"
+
+      - name: Apply team id
+        if: env.HAVE_TEAM == 'true' || env.HAVE_CERT == 'true'
+        env:
+          TEAM_ID_SECRET: ${{ secrets.TEAM_ID }}
+        run: |
+          TEAM="${TEAM_ID_SECRET:-$CERT_TEAM}"
+          if [ -z "$TEAM" ]; then echo "no team id available; leaving the TEAMID placeholder"; exit 0; fi
+          echo "::add-mask::$TEAM"
+          sed -i '' "s/TEAMID/${TEAM}/g" project.yml
+          echo "team id applied to the dext bundle id"
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -59,28 +98,6 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             2>&1 | tee build.log | tail -n 150
 
-      - name: Import signing certificate (optional)
-        if: env.HAVE_CERT == 'true'
-        env:
-          SIGN_CERT_P12: ${{ secrets.SIGN_CERT_P12 }}
-          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD || secrets.PASSWORDISFEET }}
-        run: |
-          set -e
-          KC="$RUNNER_TEMP/sign.keychain-db"
-          KP="$(uuidgen)"
-          echo "$SIGN_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security create-keychain -p "$KP" "$KC"
-          security set-keychain-settings -lut 3600 "$KC"
-          security unlock-keychain -p "$KP" "$KC"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$SIGN_CERT_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KC" >/dev/null
-          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
-          rm -f "$RUNNER_TEMP/cert.p12"
-          IDENT="$(security find-identity -v -p codesigning "$KC" | awk 'NR==1 {print $2}')"
-          test -n "$IDENT" || { echo "no codesigning identity found in the p12"; exit 1; }
-          echo "IDENT=$IDENT" >> "$GITHUB_ENV"
-          security find-identity -v -p codesigning "$KC" | sed 's/[0-9A-F]\{40\}/<hash>/'
-
       - name: Check, sign and package IPA
         env:
           DEXT_PROFILE: ${{ secrets.DEXT_PROFILE }}
@@ -94,10 +111,9 @@ jobs:
           lipo -archs "$APP/UsbmuxProbe"
 
           echo "--- embedded dext"
-          ls -la "$APP/SystemExtensions" || { echo "dext was not embedded"; exit 1; }
+          ls "$APP/SystemExtensions" >/dev/null || { echo "dext was not embedded"; exit 1; }
           for d in "$APP"/SystemExtensions/*.dext; do
             exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$d/Info.plist")
-            echo "$d"
             lipo -archs "$d/$exe"
             vtool -show-build "$d/$exe" | head -n 8
           done
@@ -112,16 +128,27 @@ jobs:
           done
           codesign --force --sign "$SIGN" --timestamp=none --entitlements App/App.entitlements "$APP"
 
-          echo "--- signature (dext)"
+          echo "--- result (identity details are deliberately not printed)"
           for d in "$APP"/SystemExtensions/*.dext; do
-            codesign -dvv "$d" 2>&1 | grep -E "^(Identifier|Authority|TeamIdentifier|Signature)" || true
+            if codesign -dvv "$d" 2>&1 | grep -q "Signature=adhoc"; then echo "dext signature: ad-hoc"; else echo "dext signature: certificate"; fi
             codesign -d --entitlements :- "$d" 2>/dev/null | grep -o "com.apple.developer[A-Za-z0-9.-]*" | sort -u
-            ls "$d" | grep -c embedded.mobileprovision | sed 's/^/embedded profile present: /' || true
+            if [ -f "$d/embedded.mobileprovision" ]; then echo "embedded profile: yes"; else echo "embedded profile: no"; fi
           done
+          if codesign -dvv "$APP" 2>&1 | grep -q "Signature=adhoc"; then echo "app signature: ad-hoc"; else echo "app signature: certificate"; fi
 
           mkdir -p Payload
           cp -R "$APP" Payload/
           zip -qry UsbmuxProbe.ipa Payload
+
+      - name: Redact build log
+        if: always()
+        env:
+          TEAM_ID_SECRET: ${{ secrets.TEAM_ID }}
+        run: |
+          for t in "$TEAM_ID_SECRET" "$CERT_TEAM"; do
+            if [ -n "$t" ] && [ -f build.log ]; then sed -i '' "s/$t/***/g" build.log; fi
+          done
+          true
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
