@@ -38,7 +38,9 @@ targets:
     settings:
       base:
         # Same convention as Xcode's DriverKit template: the .dext is named after its bundle id.
-        PRODUCT_BUNDLE_IDENTIFIER: com.usbmuxprobe.app.driver
+        # SideStore rewrites the app id to com.usbmuxprobe.app.<TEAMID>; iOS requires the dext id
+        # to start with that. TEAMID is a placeholder, swapped for the real team id after the build.
+        PRODUCT_BUNDLE_IDENTIFIER: com.usbmuxprobe.app.TEAMID.driver
         PRODUCT_NAME: $(PRODUCT_BUNDLE_IDENTIFIER)
         SDKROOT: driverkit
         SUPPORTED_PLATFORMS: driverkit
