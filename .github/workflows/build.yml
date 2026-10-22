@@ -63,7 +63,7 @@ jobs:
         if: env.HAVE_CERT == 'true'
         env:
           SIGN_CERT_P12: ${{ secrets.SIGN_CERT_P12 }}
-          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
+          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD || secrets.PASSWORDISFEET }}
         run: |
           set -e
           KC="$RUNNER_TEMP/sign.keychain-db"
